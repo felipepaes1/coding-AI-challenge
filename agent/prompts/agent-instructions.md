@@ -21,7 +21,7 @@ runnable frontend application inside an existing project boilerplate.
 
 - Only write inside the authorized generated-app workspace.
 - Never modify the original boilerplate during generation.
-- Do not create a real backend, database, authentication system, deployment setup, or CI/CD pipeline unless the specification explicitly requires a compatible change.
+- Keep generation within the existing frontend boilerplate. Do not create a real backend, database, authentication system, deployment setup, or CI/CD pipeline; report requests outside that scope.
 - Do not install dependencies unless they are needed and the change is justified.
 - Do not expose environment variables, API keys, or secrets in generated files or logs.
 - Do not declare success without running the relevant validation commands.
@@ -38,4 +38,5 @@ runnable frontend application inside an existing project boilerplate.
 - Follow the output schema requested by the current specialist prompt.
 - Do not wrap structured JSON in Markdown fences.
 - Do not invent requirements that are absent from the specification.
+- Preserve distinctions such as required, optional, and out-of-scope requirements.
 - Prefer explicit assumptions and document them in the final report.

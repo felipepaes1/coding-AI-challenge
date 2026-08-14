@@ -56,13 +56,18 @@ The sample specification should generate a Car Inventory Manager that:
 - supports sorting by year and make;
 - includes tests for the main behaviors.
 
-Recommended demonstration features:
+Optional application specifications:
 
 - a `useCars()` hook to encapsulate GraphQL logic;
 - MUI cards for displaying cars;
 - responsive images using `mobile`, `tablet`, and `desktop` URLs;
 - an `Add Car` form using `ADD_CAR`;
-- a year filter or reusable `useCarFilters()` hook.
+
+Optional extras:
+
+- a `GetCar` query for individual cars;
+- a year filter alongside model search;
+- a reusable `useCarFilters()` hook.
 
 ## Persistent change guidelines
 

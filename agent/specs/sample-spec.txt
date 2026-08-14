@@ -1,0 +1,60 @@
+Car Inventory Manager - Sample Specification
+
+This file is a sample natural-language input for the code-generation workflow.
+It describes the reference application from the challenge and can be replaced
+or modified without changing the agent code or its permanent prompts.
+
+Required Application Specifications
+-----------------------------------
+
+Build a working Car Inventory Manager backed by the mock GraphQL API provided
+by the existing boilerplate.
+
+The application must:
+
+1. Display a list of cars fetched through Apollo Client from the mock GraphQL
+   API using the `GetCars` query served by MSW.
+2. Provide a search bar that filters the inventory by car model.
+3. Provide sorting by year or make.
+4. Include an acceptable level of automated testing for the required behavior.
+
+Optional Application Specifications
+-----------------------------------
+
+After the required application behavior is complete, the agent may also:
+
+1. Extract the GraphQL logic into a `useCars()` custom hook.
+2. Show the appropriate car image for the current viewport width:
+   - up to 640px: `mobile`;
+   - from 641px through 1023px: `tablet`;
+   - 1024px and above: `desktop`.
+3. Use Material UI cards to show each car's make, model, year, color, and image.
+4. Include an "Add Car" form that submits through the `AddCar` GraphQL
+   mutation.
+
+Provided Mock Data Schema
+-------------------------
+
+The boilerplate provides five seed cars using this shape:
+
+```ts
+interface Car {
+  id: string;
+  make: string;
+  model: string;
+  year: number;
+  color: string;
+  mobile: string;
+  tablet: string;
+  desktop: string;
+}
+```
+
+Optional Extras
+---------------
+
+If time and scope allow, the agent may additionally implement:
+
+- a `GetCar` query for fetching an individual car;
+- a year filter alongside the model search;
+- a reusable `useCarFilters()` hook combining the filter logic.
