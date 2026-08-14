@@ -12,6 +12,7 @@ const protectedTopLevelDirectories = new Set([
   "dist",
   "node_modules",
   "public",
+  "sample-output",
   "src",
 ]);
 
@@ -26,10 +27,17 @@ const ignoredTopLevelEntries = new Set([
   "dist",
   "generated-app",
   "node_modules",
+  "sample-output",
   "tmp",
 ]);
 
-const ignoredFiles = new Set([".env", "AGENTS.md", "tsconfig.tsbuildinfo"]);
+const ignoredFiles = new Set([
+  ".env",
+  ".env.example",
+  "AGENTS.md",
+  "README.md",
+  "tsconfig.tsbuildinfo",
+]);
 
 export class WorkspaceError extends Error {
   constructor(message: string) {
