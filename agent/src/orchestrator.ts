@@ -42,6 +42,15 @@ export type GenerationTaskResult = {
   assumptions?: string[];
 };
 
+export type RepairTaskResult = {
+  taskId: string;
+  status: "fixed" | "unresolved";
+  rootCause: string;
+  changedFiles: string[];
+  summary: string;
+  nextValidation: string;
+};
+
 export type PhaseValidationResult = {
   passed: boolean;
   summary: string;
@@ -58,7 +67,17 @@ export type PhaseResult = {
   changedFiles: string[];
   summary: string;
   validation?: PhaseValidationResult;
+  repairAttempts?: RepairAttemptReport[];
   error?: string;
+};
+
+export type RepairAttemptReport = {
+  attempt: number;
+  status: RepairTaskResult["status"];
+  rootCause: string;
+  changedFiles: string[];
+  summary: string;
+  validation?: PhaseValidationResult;
 };
 
 export type OrchestrationReport = {
@@ -73,6 +92,13 @@ export type OrchestrationEvent =
   | { type: "context_loaded"; taskId: string; relevantFileCount: number }
   | { type: "generation_completed"; taskId: string; changedFileCount: number }
   | { type: "validation_completed"; taskId: string; passed: boolean }
+  | { type: "repair_started"; taskId: string; attempt: number; maxAttempts: number }
+  | {
+      type: "repair_completed";
+      taskId: string;
+      attempt: number;
+      status: RepairTaskResult["status"];
+    }
   | { type: "phase_failed"; taskId: string; error: string }
   | { type: "workflow_completed"; status: OrchestrationReport["status"] };
 
@@ -85,12 +111,21 @@ export type PhaseValidator = (
   generationResult: GenerationTaskResult,
 ) => Promise<PhaseValidationResult>;
 
+export type PhaseRepairer = (
+  context: GenerationPhaseContext,
+  validation: PhaseValidationResult,
+  attempt: number,
+  maxAttempts: number,
+) => Promise<RepairTaskResult>;
+
 export type OrchestrationOptions = {
   plan: ImplementationPlan;
   specification: string;
   workspaceRoot: string;
   executeTask: PhaseExecutor;
   validateTask: PhaseValidator;
+  repairTask?: PhaseRepairer;
+  maxRepairAttempts?: number;
   onEvent?: (event: OrchestrationEvent) => void | Promise<void>;
 };
 
@@ -100,6 +135,39 @@ function formatError(error: unknown): string {
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths)].slice(0, MAX_RELEVANT_FILES);
+}
+
+function normalizeMaxRepairAttempts(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) {
+    return 2;
+  }
+
+  return Math.min(2, Math.max(0, Math.floor(value)));
+}
+
+function buildValidationFailureMessage(
+  taskId: string,
+  validation: PhaseValidationResult,
+  repairAttempts: RepairAttemptReport[],
+  maxRepairAttempts: number,
+): string {
+  const details = [
+    `Validation failed for task ${taskId}.`,
+    validation.command ? `Command: ${validation.command}` : undefined,
+    validation.stdout ? `stdout:\n${validation.stdout}` : undefined,
+    validation.stderr ? `stderr:\n${validation.stderr}` : undefined,
+    repairAttempts.length > 0
+      ? `Repair attempts: ${repairAttempts.length}/${maxRepairAttempts}.`
+      : "No repair attempt was executed.",
+    repairAttempts.at(-1)?.rootCause
+      ? `Last repair diagnosis: ${repairAttempts.at(-1)?.rootCause}`
+      : undefined,
+    repairAttempts.length >= 2
+      ? "The maximum number of repair attempts for this phase was reached."
+      : undefined,
+  ];
+
+  return [...details, validation.summary].filter(Boolean).join("\n");
 }
 
 async function readRelatedFile(
@@ -137,6 +205,7 @@ export async function collectPhaseContext(
   specification: string,
   task: ImplementationTask,
   completedTasks: CompletedTaskSummary[],
+  additionalRelatedFiles: string[] = [],
 ): Promise<GenerationPhaseContext> {
   const projectSummary = await getWorkspaceSummary(workspaceRoot);
   const dependencySummaries = completedTasks.filter((completedTask) =>
@@ -145,7 +214,11 @@ export async function collectPhaseContext(
   const dependencyFiles = dependencySummaries.flatMap(
     (completedTask) => completedTask.changedFiles,
   );
-  const relatedPaths = uniquePaths([...task.files, ...dependencyFiles]);
+  const relatedPaths = uniquePaths([
+    ...task.files,
+    ...dependencyFiles,
+    ...additionalRelatedFiles,
+  ]);
   const relevantFiles = await Promise.all(
     relatedPaths.map((path) => readRelatedFile(workspaceRoot, path)),
   );
@@ -165,10 +238,13 @@ export async function runGenerationPhases({
   workspaceRoot,
   executeTask,
   validateTask,
+  repairTask,
+  maxRepairAttempts,
   onEvent,
 }: OrchestrationOptions): Promise<OrchestrationReport> {
   const phases: PhaseResult[] = [];
   const completedTasks: CompletedTaskSummary[] = [];
+  const repairLimit = normalizeMaxRepairAttempts(maxRepairAttempts);
 
   const emit = async (event: OrchestrationEvent): Promise<void> => {
     await onEvent?.(event);
@@ -289,27 +365,130 @@ export async function runGenerationPhases({
     let validation: PhaseValidationResult;
     try {
       validation = await validateTask(context, generationResult);
-      await emit({
-        type: "validation_completed",
-        taskId: task.id,
-        passed: validation.passed,
-      });
     } catch (error) {
       validation = {
         passed: false,
         summary: formatError(error),
       };
     }
+    await emit({
+      type: "validation_completed",
+      taskId: task.id,
+      passed: validation.passed,
+    });
 
-    if (!validation.passed) {
-      const error = validation.summary || `Validation failed for task ${task.id}`;
+    const changedFiles = new Set(generationResult.changedFiles);
+    const repairAttempts: RepairAttemptReport[] = [];
+    let currentContext = context;
+    let currentValidation = validation;
+
+    for (
+      let attempt = 1;
+      !currentValidation.passed && repairTask && attempt <= repairLimit;
+      attempt += 1
+    ) {
+      await emit({
+        type: "repair_started",
+        taskId: task.id,
+        attempt,
+        maxAttempts: repairLimit,
+      });
+
+      let repairResult: RepairTaskResult;
+      try {
+        currentContext = await collectPhaseContext(
+          workspaceRoot,
+          specification,
+          task,
+          completedTasks,
+          [...changedFiles],
+        );
+        repairResult = await repairTask(
+          currentContext,
+          currentValidation,
+          attempt,
+          repairLimit,
+        );
+        if (repairResult.taskId !== task.id) {
+          throw new Error(
+            `Repair returned task ${repairResult.taskId}; expected ${task.id}`,
+          );
+        }
+      } catch (error) {
+        repairResult = {
+          taskId: task.id,
+          status: "unresolved",
+          rootCause: `Repair agent failed: ${formatError(error)}`,
+          changedFiles: [],
+          summary: "The repair agent could not complete this attempt.",
+          nextValidation: currentValidation.command ?? "the failed validation command",
+        };
+      }
+
+      for (const filePath of repairResult.changedFiles) {
+        changedFiles.add(filePath);
+      }
+
+      const repairReport: RepairAttemptReport = {
+        attempt,
+        status: repairResult.status,
+        rootCause: repairResult.rootCause,
+        changedFiles: repairResult.changedFiles,
+        summary: repairResult.summary,
+      };
+      repairAttempts.push(repairReport);
+      await emit({
+        type: "repair_completed",
+        taskId: task.id,
+        attempt,
+        status: repairResult.status,
+      });
+
+      if (repairResult.status !== "fixed") {
+        break;
+      }
+
+      try {
+        currentContext = await collectPhaseContext(
+          workspaceRoot,
+          specification,
+          task,
+          completedTasks,
+          [...changedFiles],
+        );
+        currentValidation = await validateTask(currentContext, {
+          ...generationResult,
+          changedFiles: [...changedFiles],
+        });
+      } catch (error) {
+        currentValidation = {
+          passed: false,
+          summary: formatError(error),
+        };
+      }
+      repairReport.validation = currentValidation;
+      await emit({
+        type: "validation_completed",
+        taskId: task.id,
+        passed: currentValidation.passed,
+      });
+    }
+
+    if (!currentValidation.passed) {
+      const error = buildValidationFailureMessage(
+        task.id,
+        currentValidation,
+        repairAttempts,
+        repairLimit,
+      );
       phases.push({
         taskId: task.id,
         title: task.title,
         status: "failed",
-        changedFiles: generationResult.changedFiles,
+        changedFiles: [...changedFiles],
         summary: generationResult.summary,
-        validation,
+        validation: currentValidation,
+        repairAttempts: repairAttempts.length > 0 ? repairAttempts : undefined,
         error,
       });
       await emit({ type: "phase_failed", taskId: task.id, error });
@@ -326,14 +505,15 @@ export async function runGenerationPhases({
       taskId: task.id,
       title: task.title,
       status: "passed",
-      changedFiles: generationResult.changedFiles,
+      changedFiles: [...changedFiles],
       summary: generationResult.summary,
-      validation,
+      validation: currentValidation,
+      repairAttempts: repairAttempts.length > 0 ? repairAttempts : undefined,
     });
     completedTasks.push({
       taskId: task.id,
       title: task.title,
-      changedFiles: generationResult.changedFiles,
+      changedFiles: [...changedFiles],
       summary: generationResult.summary,
     });
   }

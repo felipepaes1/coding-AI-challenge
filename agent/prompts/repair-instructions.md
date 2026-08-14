@@ -30,6 +30,7 @@ task, and the relevant source files.
 Return valid JSON matching this shape:
 
 {
+  "taskId": "current-task-id",
   "status": "fixed | unresolved",
   "rootCause": "concise diagnosis",
   "changedFiles": ["relative/path/to/changed-file.ts"],
