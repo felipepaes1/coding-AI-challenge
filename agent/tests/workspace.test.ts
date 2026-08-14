@@ -43,6 +43,7 @@ describe("workspace utilities", () => {
 
   it("rejects protected output directories", () => {
     expect(() => resolveOutputPath("src")).toThrow(WorkspaceError);
+    expect(() => resolveOutputPath("sample-output")).toThrow(WorkspaceError);
     expect(() => resolveOutputPath("../outside-project")).toThrow(WorkspaceError);
   });
 
@@ -56,7 +57,10 @@ describe("workspace utilities", () => {
     await expect(access(resolve(preparedPath, "package.json"))).resolves.toBeUndefined();
     await expect(access(resolve(preparedPath, "src", "App.tsx"))).resolves.toBeUndefined();
     await expect(access(resolve(preparedPath, "agent"))).rejects.toThrow();
+    await expect(access(resolve(preparedPath, "sample-output"))).rejects.toThrow();
     await expect(access(resolve(preparedPath, "node_modules"))).rejects.toThrow();
+    await expect(access(resolve(preparedPath, ".env.example"))).rejects.toThrow();
+    await expect(access(resolve(preparedPath, "README.md"))).rejects.toThrow();
     await expect(access(resolve(preparedPath, "tsconfig.tsbuildinfo"))).rejects.toThrow();
     await expect(readFile(resolve(preparedPath, "vitest.config.ts"), "utf8"))
       .resolves.toContain('setupFiles: [resolve(__dirname, "src/test-setup.ts")]');
