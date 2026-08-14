@@ -334,7 +334,7 @@ function commandParts(command: AllowedCommand): [string, string[]] {
   }
 }
 
-async function runWorkspaceCommand(
+export async function runWorkspaceCommand(
   workspaceRoot: string,
   command: AllowedCommand,
 ): Promise<ToolSuccess<{

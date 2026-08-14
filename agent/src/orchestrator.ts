@@ -9,6 +9,7 @@ import {
   ToolWorkspaceError,
   type WorkspaceSummary,
 } from "./tools/index.js";
+import type { ValidationResult } from "./validator.js";
 
 const MAX_RELEVANT_FILES = 24;
 const MAX_RELEVANT_FILE_CHARACTERS = 20_000;
@@ -47,6 +48,7 @@ export type PhaseValidationResult = {
   command?: string;
   stdout?: string;
   stderr?: string;
+  results?: ValidationResult[];
 };
 
 export type PhaseResult = {
