@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,7 +13,11 @@ import {
   readWorkspaceFile,
   type WorkspaceSummary,
 } from "./tools/index.js";
-import { createAgentTools, type AgentToolSet } from "./tools/index.js";
+import {
+  createAgentTools,
+  type AgentToolEvent,
+  type AgentToolSet,
+} from "./tools/index.js";
 
 const reviewerInstructionsPath = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -58,6 +60,7 @@ export type ReviewerOptions = {
   runner?: Runner;
   maxTurns?: number;
   relevantFilePaths?: string[];
+  onToolEvent?: (event: AgentToolEvent) => void | Promise<void>;
 };
 
 export class ReviewerValidationError extends Error {
@@ -187,8 +190,11 @@ export function createReviewerAgent(
   workspaceRoot: string,
   instructions: string,
   model = process.env.OPENAI_MODEL,
+  onToolEvent?: ReviewerOptions["onToolEvent"],
 ) {
-  const agentTools: AgentToolSet = createAgentTools(workspaceRoot);
+  const agentTools: AgentToolSet = createAgentTools(workspaceRoot, {
+    onEvent: onToolEvent,
+  });
   const reviewerTools = [
     agentTools.listFiles,
     agentTools.readFile,
@@ -217,6 +223,7 @@ export async function runReviewer(
     context.workspaceRoot,
     instructions,
     options.model,
+    options.onToolEvent,
   );
   const runner = options.runner ?? new Runner();
   const result = await runner.run(reviewer, buildReviewerInput(reviewerContext), {

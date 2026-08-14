@@ -1,15 +1,18 @@
-import "dotenv/config";
-
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Agent, Runner } from "@openai/agents";
 import { z } from "zod";
-import { createAgentTools, type AgentToolSet } from "./tools/index.js";
+import {
+  createAgentTools,
+  type AgentToolEvent,
+  type AgentToolSet,
+} from "./tools/index.js";
 import type {
   GenerationPhaseContext,
   PhaseRepairer,
   PhaseValidationResult,
+  RepairAttemptReport,
 } from "./orchestrator.js";
 
 const repairInstructionsPath = resolve(
@@ -35,6 +38,7 @@ export type RepairOptions = {
   model?: string;
   runner?: Runner;
   maxTurns?: number;
+  onToolEvent?: (event: AgentToolEvent) => void | Promise<void>;
 };
 
 export class RepairValidationError extends Error {
@@ -62,6 +66,7 @@ function isSafeRelativePath(path: string): boolean {
 export function validateRepairResult(
   input: unknown,
   expectedTaskId?: string,
+  allowedWritePaths?: readonly string[],
 ): RepairResult {
   const parsedResult = repairResultSchema.safeParse(input);
   if (!parsedResult.success) {
@@ -76,10 +81,18 @@ export function validateRepairResult(
     );
   }
 
+  const allowedPaths = allowedWritePaths
+    ? new Set(allowedWritePaths.map((path) => posix.normalize(path.replace(/\\/gu, "/"))))
+    : undefined;
   for (const filePath of parsedResult.data.changedFiles) {
     if (!isSafeRelativePath(filePath)) {
       throw new RepairValidationError(
         `Repair reported an unsafe changed file path: ${filePath}`,
+      );
+    }
+    if (allowedPaths && !allowedPaths.has(posix.normalize(filePath.replace(/\\/gu, "/")))) {
+      throw new RepairValidationError(
+        `Repair reported a changed file outside the current task: ${filePath}`,
       );
     }
   }
@@ -107,6 +120,7 @@ export function buildRepairInput(
   validation: PhaseValidationResult,
   attempt: number,
   maxAttempts: number,
+  previousAttempts: readonly RepairAttemptReport[] = [],
 ): string {
   const relevantFiles = context.relevantFiles
     .map(
@@ -128,6 +142,11 @@ export function buildRepairInput(
     "## VALIDATION_FAILURE",
     buildValidationContext(validation),
     "",
+    "## PREVIOUS_REPAIR_ATTEMPTS",
+    previousAttempts.length > 0
+      ? JSON.stringify(previousAttempts, null, 2)
+      : "No previous repair attempt.",
+    "",
     "## COMPLETED_DEPENDENCIES",
     JSON.stringify(context.completedDependencies, null, 2),
     "",
@@ -145,8 +164,14 @@ export function createRepairAgent(
   workspaceRoot: string,
   instructions: string,
   model = process.env.OPENAI_MODEL,
+  onToolEvent?: RepairOptions["onToolEvent"],
+  allowedWritePaths?: readonly string[],
 ) {
-  const agentTools: AgentToolSet = createAgentTools(workspaceRoot);
+  const agentTools: AgentToolSet = createAgentTools(workspaceRoot, {
+    onEvent: onToolEvent,
+    requireInspectionBeforeWrite: true,
+    allowedWritePaths,
+  });
   const repairTools = [
     agentTools.listFiles,
     agentTools.readFile,
@@ -168,6 +193,7 @@ export async function runRepairAgent(
   validation: PhaseValidationResult,
   attempt: number,
   maxAttempts: number,
+  previousAttempts: readonly RepairAttemptReport[] = [],
   options: RepairOptions = {},
 ): Promise<RepairResult> {
   const instructions = options.instructions ?? (await loadRepairInstructions());
@@ -175,11 +201,13 @@ export async function runRepairAgent(
     context.projectSummary.workspaceRoot,
     instructions,
     options.model,
+    options.onToolEvent,
+    context.task.files,
   );
   const runner = options.runner ?? new Runner();
   const result = await runner.run(
     repairAgent,
-    buildRepairInput(context, validation, attempt, maxAttempts),
+    buildRepairInput(context, validation, attempt, maxAttempts, previousAttempts),
     { maxTurns: options.maxTurns ?? 15 },
   );
 
@@ -187,10 +215,17 @@ export async function runRepairAgent(
     throw new RepairValidationError("Repair run completed without a final output");
   }
 
-  return validateRepairResult(result.finalOutput, context.task.id);
+  return validateRepairResult(result.finalOutput, context.task.id, context.task.files);
 }
 
 export function createRepairExecutor(options: RepairOptions = {}): PhaseRepairer {
-  return (context, validation, attempt, maxAttempts) =>
-    runRepairAgent(context, validation, attempt, maxAttempts, options);
+  return (context, validation, attempt, maxAttempts, previousAttempts) =>
+    runRepairAgent(
+      context,
+      validation,
+      attempt,
+      maxAttempts,
+      previousAttempts,
+      options,
+    );
 }

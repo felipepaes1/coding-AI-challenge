@@ -39,7 +39,7 @@ export type ValidationPipelineOptions = {
 };
 
 const commandsByStage: Record<ValidationStage, ValidationCommand[]> = {
-  setup: ["npm install"],
+  setup: ["npm install", "npm run typecheck", "npm test", "npm run build"],
   foundation: ["npm run typecheck"],
   behavior: ["npm run typecheck", "npm test"],
   final: ["npm run typecheck", "npm test", "npm run build"],

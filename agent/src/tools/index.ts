@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { cp, lstat, mkdir, readFile as readTextFile, readdir, realpath, stat, writeFile as writeTextFile } from "node:fs/promises";
+import { mkdir, readFile as readTextFile, readdir, realpath, rm, stat, writeFile as writeTextFile } from "node:fs/promises";
 import { isAbsolute, dirname, posix, relative, resolve, sep, win32 } from "node:path";
 import { promisify } from "node:util";
 import { tool } from "@openai/agents";
@@ -11,6 +11,13 @@ const MAX_READ_CHARACTERS = 30_000;
 const MAX_WRITE_CHARACTERS = 250_000;
 const MAX_LIST_ENTRIES = 500;
 const COMMAND_TIMEOUT_MS = 300_000;
+const IGNORED_RECURSIVE_DIRECTORIES = new Set([
+  ".git",
+  ".vite",
+  "coverage",
+  "dist",
+  "node_modules",
+]);
 
 export const allowedCommands = [
   "npm install",
@@ -28,6 +35,32 @@ export type ToolFailure = {
 };
 
 export type ToolSuccess<T extends object> = { ok: true } & T;
+
+export type AgentToolEvent =
+  | {
+      type: "tool_started";
+      tool: string;
+      detail: string;
+    }
+  | {
+      type: "tool_completed";
+      tool: string;
+      detail: string;
+      ok: boolean;
+      durationMs: number;
+    };
+
+export type AgentToolOptions = {
+  onEvent?: (event: AgentToolEvent) => void | Promise<void>;
+  requireInspectionBeforeWrite?: boolean;
+  allowedWritePaths?: readonly string[];
+};
+
+export type WorkspaceFileSnapshot = {
+  path: string;
+  existed: boolean;
+  content?: string;
+};
 
 export class ToolWorkspaceError extends Error {
   constructor(
@@ -77,6 +110,11 @@ function assertRelativePath(inputPath: string): void {
       "INVALID_PATH",
     );
   }
+}
+
+function normalizeWorkspaceRelativePath(inputPath: string): string {
+  assertRelativePath(inputPath);
+  return posix.normalize(inputPath.replace(/\\/gu, "/")).replace(/^\.\//u, "");
 }
 
 async function assertRealPathInside(
@@ -186,6 +224,10 @@ function truncateText(value: string, maxCharacters: number): {
   };
 }
 
+export function sanitizeCommandOutput(value: string): string {
+  return value.replace(/\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/gu, "");
+}
+
 const listFilesParameters = z.object({
   relativePath: z.string().default("."),
   recursive: z.boolean().default(false),
@@ -243,6 +285,14 @@ export async function listWorkspaceFiles(
     directoryEntries.sort((left, right) => left.name.localeCompare(right.name));
 
     for (const entry of directoryEntries) {
+      if (
+        recursive &&
+        entry.isDirectory() &&
+        IGNORED_RECURSIVE_DIRECTORIES.has(entry.name)
+      ) {
+        continue;
+      }
+
       if (entries.length >= maxEntries) {
         truncated = true;
         return;
@@ -299,7 +349,7 @@ export async function readWorkspaceFile(
   };
 }
 
-async function writeWorkspaceFile(
+export async function writeWorkspaceFile(
   workspaceRoot: string,
   path: string,
   content: string,
@@ -318,6 +368,51 @@ async function writeWorkspaceFile(
     bytesWritten: Buffer.byteLength(content, "utf8"),
     created: !existed,
   };
+}
+
+export async function snapshotWorkspaceFiles(
+  workspaceRoot: string,
+  paths: readonly string[],
+): Promise<WorkspaceFileSnapshot[]> {
+  const snapshots: WorkspaceFileSnapshot[] = [];
+  const uniquePaths = [...new Set(paths.map(normalizeWorkspaceRelativePath))];
+
+  for (const path of uniquePaths) {
+    try {
+      const file = await readWorkspaceFile(workspaceRoot, path, MAX_WRITE_CHARACTERS);
+      if (file.truncated) {
+        throw new ToolWorkspaceError(
+          `Cannot snapshot a file larger than the writable file limit: ${path}`,
+          "SNAPSHOT_TOO_LARGE",
+        );
+      }
+      snapshots.push({ path: file.path, existed: true, content: file.content });
+    } catch (error) {
+      if (error instanceof ToolWorkspaceError && error.code === "FILE_NOT_FOUND") {
+        await resolveWritablePath(workspaceRoot, path);
+        snapshots.push({ path, existed: false });
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  return snapshots;
+}
+
+export async function restoreWorkspaceFiles(
+  workspaceRoot: string,
+  snapshots: readonly WorkspaceFileSnapshot[],
+): Promise<void> {
+  for (const snapshot of snapshots) {
+    if (snapshot.existed) {
+      await writeWorkspaceFile(workspaceRoot, snapshot.path, snapshot.content ?? "");
+      continue;
+    }
+
+    const { absolutePath } = await resolveWritablePath(workspaceRoot, snapshot.path);
+    await rm(absolutePath, { force: true });
+  }
 }
 
 function commandParts(command: AllowedCommand): [string, string[]] {
@@ -357,12 +452,13 @@ export async function runWorkspaceCommand(
         : args;
     const result = await execFile(commandExecutable, commandArguments, {
       cwd: workspaceRoot,
+      env: { ...process.env, NO_COLOR: "1" },
       timeout: COMMAND_TIMEOUT_MS,
       maxBuffer: 2 * 1024 * 1024,
       windowsHide: true,
     });
-    const stdout = truncateText(result.stdout, outputLimit);
-    const stderr = truncateText(result.stderr, outputLimit);
+    const stdout = truncateText(sanitizeCommandOutput(result.stdout), outputLimit);
+    const stderr = truncateText(sanitizeCommandOutput(result.stderr), outputLimit);
     return {
       ok: true,
       command,
@@ -381,9 +477,14 @@ export async function runWorkspaceCommand(
       signal?: string;
       message?: string;
     };
-    const stdout = truncateText(commandError.stdout ?? "", outputLimit);
+    const stdout = truncateText(
+      sanitizeCommandOutput(commandError.stdout ?? ""),
+      outputLimit,
+    );
     const stderr = truncateText(
-      commandError.stderr || commandError.message || "Command failed",
+      sanitizeCommandOutput(
+        commandError.stderr || commandError.message || "Command failed",
+      ),
       outputLimit,
     );
     const numericExitCode = typeof commandError.code === "number" ? commandError.code : 1;
@@ -421,19 +522,61 @@ export async function getWorkspaceSummary(
   };
 }
 
-export function createAgentTools(workspaceRootInput: string) {
+export function createAgentTools(
+  workspaceRootInput: string,
+  options: AgentToolOptions = {},
+) {
   const workspaceRoot = resolve(workspaceRootInput);
+  let workspaceInspected = !options.requireInspectionBeforeWrite;
+  const allowedWritePaths = options.allowedWritePaths === undefined
+    ? undefined
+    : new Set(options.allowedWritePaths.map(normalizeWorkspaceRelativePath));
+
+  const emit = async (event: AgentToolEvent): Promise<void> => {
+    try {
+      await options.onEvent?.(event);
+    } catch {
+      // Observability must never interrupt a tool operation.
+    }
+  };
+
+  const executeObserved = async <T extends { ok: boolean }>(
+    toolName: string,
+    detail: string,
+    operation: () => Promise<T>,
+  ): Promise<T | ToolFailure> => {
+    const startedAt = Date.now();
+    await emit({ type: "tool_started", tool: toolName, detail });
+
+    let result: T | ToolFailure;
+    try {
+      result = await operation();
+    } catch (error) {
+      result = failure(error);
+    }
+
+    await emit({
+      type: "tool_completed",
+      tool: toolName,
+      detail,
+      ok: result.ok,
+      durationMs: Date.now() - startedAt,
+    });
+    return result;
+  };
 
   const listFiles = tool({
     name: "listFiles",
     description: "List files and directories inside the generated application workspace.",
     parameters: listFilesParameters,
     execute: async ({ relativePath, recursive, maxEntries }) => {
-      try {
-        return await listWorkspaceFiles(workspaceRoot, relativePath, recursive, maxEntries);
-      } catch (error) {
-        return failure(error);
-      }
+      const result = await executeObserved(
+        "listFiles",
+        `path=${relativePath} recursive=${String(recursive)} maxEntries=${maxEntries}`,
+        () => listWorkspaceFiles(workspaceRoot, relativePath, recursive, maxEntries),
+      );
+      if (result.ok) workspaceInspected = true;
+      return result;
     },
   });
 
@@ -442,11 +585,11 @@ export function createAgentTools(workspaceRootInput: string) {
     description: "Read a UTF-8 text file inside the generated application workspace.",
     parameters: readFileParameters,
     execute: async ({ path, maxCharacters }) => {
-      try {
-        return await readWorkspaceFile(workspaceRoot, path, maxCharacters);
-      } catch (error) {
-        return failure(error);
-      }
+      const result = await executeObserved("readFile", `path=${path}`, () =>
+        readWorkspaceFile(workspaceRoot, path, maxCharacters),
+      );
+      if (result.ok) workspaceInspected = true;
+      return result;
     },
   });
 
@@ -454,13 +597,27 @@ export function createAgentTools(workspaceRootInput: string) {
     name: "writeFile",
     description: "Create or replace a UTF-8 text file inside the generated application workspace.",
     parameters: writeFileParameters,
-    execute: async ({ path, content }) => {
-      try {
-        return await writeWorkspaceFile(workspaceRoot, path, content);
-      } catch (error) {
-        return failure(error);
-      }
-    },
+    execute: async ({ path, content }) =>
+      executeObserved(
+        "writeFile",
+        `path=${path} bytes=${Buffer.byteLength(content, "utf8")}`,
+        () => {
+          const normalizedPath = normalizeWorkspaceRelativePath(path);
+          if (allowedWritePaths && !allowedWritePaths.has(normalizedPath)) {
+            throw new ToolWorkspaceError(
+              `Writing outside the current task file list is not allowed: ${path}`,
+              "WRITE_NOT_ALLOWED",
+            );
+          }
+          if (!workspaceInspected) {
+            throw new ToolWorkspaceError(
+              "Inspect the workspace with listFiles, readFile, or getProjectSummary before writing a repair.",
+              "INSPECTION_REQUIRED",
+            );
+          }
+          return writeWorkspaceFile(workspaceRoot, normalizedPath, content);
+        },
+      ),
   });
 
   const runCommand = tool({
@@ -468,13 +625,10 @@ export function createAgentTools(workspaceRootInput: string) {
     description: "Run one approved npm validation command inside the generated application workspace.",
     parameters: runCommandParameters,
     timeoutMs: COMMAND_TIMEOUT_MS + 10_000,
-    execute: async ({ command }) => {
-      try {
-        return await runWorkspaceCommand(workspaceRoot, command);
-      } catch (error) {
-        return failure(error);
-      }
-    },
+    execute: async ({ command }) =>
+      executeObserved("runCommand", `command=${command}`, () =>
+        runWorkspaceCommand(workspaceRoot, command),
+      ),
   });
 
   const getProjectSummary = tool({
@@ -482,11 +636,11 @@ export function createAgentTools(workspaceRootInput: string) {
     description: "Summarize the generated application's package metadata and file tree.",
     parameters: emptyParameters,
     execute: async () => {
-      try {
-        return await getWorkspaceSummary(workspaceRoot);
-      } catch (error) {
-        return failure(error);
-      }
+      const result = await executeObserved("getProjectSummary", "workspace summary", () =>
+        getWorkspaceSummary(workspaceRoot),
+      );
+      if (result.ok) workspaceInspected = true;
+      return result;
     },
   });
 

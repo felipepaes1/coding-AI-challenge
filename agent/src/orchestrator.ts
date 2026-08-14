@@ -6,7 +6,10 @@ import type {
 import {
   getWorkspaceSummary,
   readWorkspaceFile,
+  restoreWorkspaceFiles,
+  snapshotWorkspaceFiles,
   ToolWorkspaceError,
+  type WorkspaceFileSnapshot,
   type WorkspaceSummary,
 } from "./tools/index.js";
 import type { ValidationResult } from "./validator.js";
@@ -14,6 +17,9 @@ import type { ReviewReport } from "./reviewer.js";
 
 const MAX_RELEVANT_FILES = 24;
 const MAX_RELEVANT_FILE_CHARACTERS = 20_000;
+const DEFAULT_MAX_REPAIR_ATTEMPTS = 4;
+const HARD_MAX_REPAIR_ATTEMPTS = 5;
+const MAX_CONSECUTIVE_UNCHANGED_FAILURES = 2;
 
 export type CompletedTaskSummary = {
   taskId: string;
@@ -67,8 +73,10 @@ export type PhaseResult = {
   status: "passed" | "failed";
   changedFiles: string[];
   summary: string;
+  initialValidation?: PhaseValidationResult;
   validation?: PhaseValidationResult;
   repairAttempts?: RepairAttemptReport[];
+  rolledBack?: boolean;
   error?: string;
 };
 
@@ -78,6 +86,7 @@ export type RepairAttemptReport = {
   rootCause: string;
   changedFiles: string[];
   summary: string;
+  repeatedFailure?: boolean;
   validation?: PhaseValidationResult;
 };
 
@@ -115,6 +124,7 @@ export type OrchestrationEvent =
   | { type: "review_started" }
   | { type: "review_completed"; recommendation: ReviewReport["recommendation"] }
   | { type: "review_failed"; error: string }
+  | { type: "phase_rolled_back"; taskId: string }
   | { type: "phase_failed"; taskId: string; error: string }
   | { type: "workflow_completed"; status: OrchestrationReport["status"] };
 
@@ -132,6 +142,7 @@ export type PhaseRepairer = (
   validation: PhaseValidationResult,
   attempt: number,
   maxAttempts: number,
+  previousAttempts: readonly RepairAttemptReport[],
 ) => Promise<RepairTaskResult>;
 
 export type OrchestrationOptions = {
@@ -154,12 +165,37 @@ function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths)].slice(0, MAX_RELEVANT_FILES);
 }
 
+function validationFailureSignature(validation: PhaseValidationResult): string {
+  const failedResult = validation.results?.find((result) => !result.passed);
+  return [
+    validation.command ?? failedResult?.command ?? "",
+    validation.summary,
+    validation.stderr ?? failedResult?.stderr ?? "",
+    validation.stdout ?? failedResult?.stdout ?? "",
+  ]
+    .join("\n")
+    .replace(/\u001B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 function normalizeMaxRepairAttempts(value: number | undefined): number {
   if (value === undefined || !Number.isFinite(value)) {
-    return 2;
+    return DEFAULT_MAX_REPAIR_ATTEMPTS;
   }
 
-  return Math.min(2, Math.max(0, Math.floor(value)));
+  return Math.min(HARD_MAX_REPAIR_ATTEMPTS, Math.max(0, Math.floor(value)));
+}
+
+function consecutiveUnchangedFailures(
+  repairAttempts: readonly RepairAttemptReport[],
+): number {
+  let count = 0;
+  for (let index = repairAttempts.length - 1; index >= 0; index -= 1) {
+    if (!repairAttempts[index]?.repeatedFailure) break;
+    count += 1;
+  }
+  return count;
 }
 
 function buildValidationFailureMessage(
@@ -179,7 +215,13 @@ function buildValidationFailureMessage(
     repairAttempts.at(-1)?.rootCause
       ? `Last repair diagnosis: ${repairAttempts.at(-1)?.rootCause}`
       : undefined,
-    repairAttempts.length >= 2
+    repairAttempts.some((repairAttempt) => repairAttempt.repeatedFailure)
+      ? "The same validation failure remained after at least one repair."
+      : undefined,
+    consecutiveUnchangedFailures(repairAttempts) >= MAX_CONSECUTIVE_UNCHANGED_FAILURES
+      ? "Repair stopped early because two consecutive attempts produced the same validation failure."
+      : undefined,
+    repairAttempts.length >= maxRepairAttempts
       ? "The maximum number of repair attempts for this phase was reached."
       : undefined,
   ];
@@ -268,6 +310,19 @@ export async function runGenerationPhases({
     await onEvent?.(event);
   };
 
+  const rollbackPhase = async (
+    taskId: string,
+    snapshots: readonly WorkspaceFileSnapshot[],
+  ): Promise<string | undefined> => {
+    try {
+      await restoreWorkspaceFiles(workspaceRoot, snapshots);
+      await emit({ type: "phase_rolled_back", taskId });
+      return undefined;
+    } catch (error) {
+      return `Failed to restore the pre-phase workspace state: ${formatError(error)}`;
+    }
+  };
+
   for (const [index, task] of plan.tasks.entries()) {
     await emit({
       type: "phase_started",
@@ -300,6 +355,7 @@ export async function runGenerationPhases({
     }
 
     let context: GenerationPhaseContext;
+    let phaseSnapshots: WorkspaceFileSnapshot[];
     try {
       context = await collectPhaseContext(
         workspaceRoot,
@@ -312,6 +368,7 @@ export async function runGenerationPhases({
         taskId: task.id,
         relevantFileCount: context.relevantFiles.length,
       });
+      phaseSnapshots = await snapshotWorkspaceFiles(workspaceRoot, task.files);
     } catch (error) {
       const message = formatError(error);
       phases.push({
@@ -341,13 +398,15 @@ export async function runGenerationPhases({
         changedFileCount: generationResult.changedFiles.length,
       });
     } catch (error) {
-      const message = formatError(error);
+      const rollbackError = await rollbackPhase(task.id, phaseSnapshots);
+      const message = [formatError(error), rollbackError].filter(Boolean).join("\n");
       phases.push({
         taskId: task.id,
         title: task.title,
         status: "failed",
         changedFiles: [],
         summary: message,
+        rolledBack: rollbackError === undefined,
         error: message,
       });
       await emit({ type: "phase_failed", taskId: task.id, error: message });
@@ -361,13 +420,18 @@ export async function runGenerationPhases({
     }
 
     if (generationResult.status !== "completed") {
-      const error = generationResult.summary || `Task ${task.id} was blocked`;
+      const rollbackError = await rollbackPhase(task.id, phaseSnapshots);
+      const error = [
+        generationResult.summary || `Task ${task.id} was blocked`,
+        rollbackError,
+      ].filter(Boolean).join("\n");
       phases.push({
         taskId: task.id,
         title: task.title,
         status: "failed",
         changedFiles: generationResult.changedFiles,
         summary: generationResult.summary,
+        rolledBack: rollbackError === undefined,
         error,
       });
       await emit({ type: "phase_failed", taskId: task.id, error });
@@ -426,6 +490,7 @@ export async function runGenerationPhases({
           currentValidation,
           attempt,
           repairLimit,
+          [...repairAttempts],
         );
         if (repairResult.taskId !== task.id) {
           throw new Error(
@@ -440,6 +505,15 @@ export async function runGenerationPhases({
           changedFiles: [],
           summary: "The repair agent could not complete this attempt.",
           nextValidation: currentValidation.command ?? "the failed validation command",
+        };
+      }
+
+      if (repairResult.status === "fixed" && repairResult.changedFiles.length === 0) {
+        repairResult = {
+          ...repairResult,
+          status: "unresolved",
+          rootCause: `${repairResult.rootCause} No workspace file was changed.`,
+          summary: "The repair reported success without changing a file, so validation was not repeated.",
         };
       }
 
@@ -466,6 +540,7 @@ export async function runGenerationPhases({
         break;
       }
 
+      const previousFailureSignature = validationFailureSignature(currentValidation);
       try {
         currentContext = await collectPhaseContext(
           workspaceRoot,
@@ -484,29 +559,43 @@ export async function runGenerationPhases({
           summary: formatError(error),
         };
       }
+      repairReport.repeatedFailure = !currentValidation.passed &&
+        validationFailureSignature(currentValidation) === previousFailureSignature;
       repairReport.validation = currentValidation;
       await emit({
         type: "validation_completed",
         taskId: task.id,
         passed: currentValidation.passed,
       });
+      if (
+        !currentValidation.passed &&
+        consecutiveUnchangedFailures(repairAttempts) >= MAX_CONSECUTIVE_UNCHANGED_FAILURES
+      ) {
+        break;
+      }
     }
 
     if (!currentValidation.passed) {
-      const error = buildValidationFailureMessage(
-        task.id,
-        currentValidation,
-        repairAttempts,
-        repairLimit,
-      );
+      const rollbackError = await rollbackPhase(task.id, phaseSnapshots);
+      const error = [
+        buildValidationFailureMessage(
+          task.id,
+          currentValidation,
+          repairAttempts,
+          repairLimit,
+        ),
+        rollbackError,
+      ].filter(Boolean).join("\n");
       phases.push({
         taskId: task.id,
         title: task.title,
         status: "failed",
         changedFiles: [...changedFiles],
         summary: generationResult.summary,
+        initialValidation: repairAttempts.length > 0 ? validation : undefined,
         validation: currentValidation,
         repairAttempts: repairAttempts.length > 0 ? repairAttempts : undefined,
+        rolledBack: rollbackError === undefined,
         error,
       });
       await emit({ type: "phase_failed", taskId: task.id, error });
@@ -525,6 +614,7 @@ export async function runGenerationPhases({
       status: "passed",
       changedFiles: [...changedFiles],
       summary: generationResult.summary,
+      initialValidation: repairAttempts.length > 0 ? validation : undefined,
       validation: currentValidation,
       repairAttempts: repairAttempts.length > 0 ? repairAttempts : undefined,
     });

@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +5,7 @@ import { Agent, Runner } from "@openai/agents";
 import { z } from "zod";
 import {
   createAgentTools,
+  type AgentToolEvent,
   type AgentToolSet,
 } from "./tools/index.js";
 import type {
@@ -37,6 +36,7 @@ export type GeneratorOptions = {
   model?: string;
   runner?: Runner;
   maxTurns?: number;
+  onToolEvent?: (event: AgentToolEvent) => void | Promise<void>;
 };
 
 export class GeneratorValidationError extends Error {
@@ -64,6 +64,7 @@ function isSafeRelativePath(path: string): boolean {
 export function validateGenerationResult(
   input: unknown,
   expectedTaskId?: string,
+  allowedWritePaths?: readonly string[],
 ): GenerationResult {
   const parsedResult = generationResultSchema.safeParse(input);
   if (!parsedResult.success) {
@@ -78,10 +79,18 @@ export function validateGenerationResult(
     );
   }
 
+  const allowedPaths = allowedWritePaths
+    ? new Set(allowedWritePaths.map((path) => posix.normalize(path.replace(/\\/gu, "/"))))
+    : undefined;
   for (const filePath of parsedResult.data.changedFiles) {
     if (!isSafeRelativePath(filePath)) {
       throw new GeneratorValidationError(
         `Generator reported an unsafe changed file path: ${filePath}`,
+      );
+    }
+    if (allowedPaths && !allowedPaths.has(posix.normalize(filePath.replace(/\\/gu, "/")))) {
+      throw new GeneratorValidationError(
+        `Generator reported a changed file outside the current task: ${filePath}`,
       );
     }
   }
@@ -121,15 +130,26 @@ export function createGeneratorAgent(
   workspaceRoot: string,
   instructions: string,
   model = process.env.OPENAI_MODEL,
+  onToolEvent?: GeneratorOptions["onToolEvent"],
+  allowedWritePaths?: readonly string[],
 ) {
-  const agentTools: AgentToolSet = createAgentTools(workspaceRoot);
+  const agentTools: AgentToolSet = createAgentTools(workspaceRoot, {
+    onEvent: onToolEvent,
+    allowedWritePaths,
+  });
+  const generatorTools = [
+    agentTools.listFiles,
+    agentTools.readFile,
+    agentTools.writeFile,
+    agentTools.getProjectSummary,
+  ];
 
   return new Agent({
     name: "Phase Code Generator",
     instructions,
     ...(model ? { model } : {}),
     outputType: generationResultSchema,
-    tools: Object.values(agentTools),
+    tools: generatorTools,
   });
 }
 
@@ -138,7 +158,13 @@ export async function runGenerator(
   options: GeneratorOptions = {},
 ): Promise<GenerationResult> {
   const instructions = options.instructions ?? (await loadGeneratorInstructions());
-  const generator = createGeneratorAgent(context.projectSummary.workspaceRoot, instructions, options.model);
+  const generator = createGeneratorAgent(
+    context.projectSummary.workspaceRoot,
+    instructions,
+    options.model,
+    options.onToolEvent,
+    context.task.files,
+  );
   const runner = options.runner ?? new Runner();
   const result = await runner.run(generator, buildGeneratorInput(context), {
     maxTurns: options.maxTurns ?? 20,
@@ -148,7 +174,7 @@ export async function runGenerator(
     throw new GeneratorValidationError("Generator run completed without a final output");
   }
 
-  return validateGenerationResult(result.finalOutput, context.task.id);
+  return validateGenerationResult(result.finalOutput, context.task.id, context.task.files);
 }
 
 export function createGeneratorExecutor(

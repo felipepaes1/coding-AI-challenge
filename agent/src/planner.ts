@@ -1,5 +1,3 @@
-import "dotenv/config";
-
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, posix, resolve, win32 } from "node:path";
 import { Agent, Runner } from "@openai/agents";
