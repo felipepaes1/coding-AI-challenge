@@ -9,7 +9,10 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "agent": "npm --prefix agent run start --",
+    "agent:test": "npm --prefix agent run test",
+    "agent:typecheck": "npm --prefix agent run typecheck"
   },
   "dependencies": {
     "@apollo/client": "^3.12.0",

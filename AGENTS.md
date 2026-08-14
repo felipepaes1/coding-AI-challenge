@@ -1,107 +1,107 @@
 # AGENTS.md
 
-## Projeto
+## Project
 
-Este repositório é a base para o Senior Fullstack Engineer Take-Home Challenge.
-O objetivo é construir um agente de geração de código que receba uma especificação
-em linguagem natural e produza uma aplicação React + TypeScript executável dentro
-do boilerplate existente.
+This repository is the base for the Senior Fullstack Engineer Take-Home Challenge.
+The goal is to build a code-generation agent that receives a natural-language
+specification and produces a runnable React + TypeScript application inside the
+existing boilerplate.
 
-O agente deve ser reutilizável para pequenas variações de aplicações frontend,
-mas a demonstração principal será o Car Inventory Manager.
+The agent should be reusable for small variations of frontend applications, but
+the main demonstration case will be the Car Inventory Manager.
 
-## Stack existente
+## Existing stack
 
 - React 19 + TypeScript
 - Vite
 - Apollo Client + GraphQL
 - Material UI
-- MSW para mock da API GraphQL
+- MSW for mocking the GraphQL API
 - Vitest + Testing Library
-- Node.js/TypeScript para o CLI do agente
-- OpenAI Agents SDK é uma opção recomendada para a orquestração do agente
+- Node.js/TypeScript for the agent CLI
+- OpenAI Agents SDK as the planned orchestration option
 
-## Estrutura atual
+## Current structure
 
-- `src/App.tsx`: shell inicial da aplicação; atualmente é um placeholder.
-- `src/types.ts`: interface `Car`.
-- `src/graphql/queries.ts`: queries `GET_CARS`, `GET_CAR` e mutation `ADD_CAR`.
-- `src/graphql/client.ts`: Apollo Client configurado para `/graphql`.
-- `src/mocks/`: dados seed e handlers MSW para GraphQL.
-- `src/components/Example.tsx`: exemplo de uso de Apollo + MUI.
-- `src/__tests__/`: testes de referência.
-- `public/mockServiceWorker.js`: service worker do MSW.
+- `src/App.tsx`: initial application shell; currently a placeholder.
+- `src/types.ts`: `Car` interface.
+- `src/graphql/queries.ts`: `GET_CARS`, `GET_CAR`, and `ADD_CAR` operations.
+- `src/graphql/client.ts`: Apollo Client configured for `/graphql`.
+- `src/mocks/`: seed data and MSW GraphQL handlers.
+- `src/components/Example.tsx`: Apollo + MUI usage example.
+- `src/__tests__/`: reference tests.
+- `public/mockServiceWorker.js`: MSW service worker.
 
-## Requisitos do agente
+## Agent requirements
 
-O agente deve:
+The agent must:
 
-1. Aceitar uma especificação por arquivo ou argumento de CLI.
-2. Inspecionar o boilerplate antes de gerar código.
-3. Planejar a implementação em tarefas ordenadas e com dependências.
-4. Gerar ou editar arquivos individualmente.
-5. Usar ferramentas explícitas para leitura/escrita de arquivos e execução de comandos.
-6. Copiar o boilerplate para o diretório de saída, sem gerar um projeto do zero.
-7. Executar `npm run typecheck`, `npm test` e, quando apropriado, `npm run build`.
-8. Ler a saída de erros e tentar corrigir falhas automaticamente pelo menos uma vez.
-9. Produzir um diretório final que possa ser executado com `npm install` e `npm run dev`.
+1. Accept a specification through a file or CLI argument.
+2. Inspect the boilerplate before generating code.
+3. Plan the implementation as ordered tasks with dependencies.
+4. Generate or edit files individually.
+5. Use explicit tools for file operations and command execution.
+6. Copy the boilerplate into the output directory instead of scaffolding from scratch.
+7. Run `npm run typecheck`, `npm test`, and, when appropriate, `npm run build`.
+8. Read command errors and attempt to fix failures automatically at least once.
+9. Produce a final directory that can be run with `npm install` and `npm run dev`.
 
-## Aplicação de demonstração
+## Demonstration application
 
-O sample spec deve gerar um Car Inventory Manager que:
+The sample specification should generate a Car Inventory Manager that:
 
-- busca carros via Apollo Client usando `GET_CARS`;
-- usa os handlers GraphQL simulados pelo MSW;
-- permite pesquisar por modelo;
-- permite ordenar por ano e fabricante;
-- possui testes para os comportamentos principais.
+- fetches cars through Apollo Client using `GET_CARS`;
+- uses the MSW GraphQL mock handlers;
+- supports searching by model;
+- supports sorting by year and make;
+- includes tests for the main behaviors.
 
-Funcionalidades recomendadas para a demonstração:
+Recommended demonstration features:
 
-- hook `useCars()` para encapsular a lógica GraphQL;
-- cards MUI para os carros;
-- imagens responsivas usando `mobile`, `tablet` e `desktop`;
-- formulário `Add Car` usando `ADD_CAR`;
-- filtro por ano ou hook `useCarFilters()`.
+- a `useCars()` hook to encapsulate GraphQL logic;
+- MUI cards for displaying cars;
+- responsive images using `mobile`, `tablet`, and `desktop` URLs;
+- an `Add Car` form using `ADD_CAR`;
+- a year filter or reusable `useCarFilters()` hook.
 
-## Instruções persistentes para alterações
+## Persistent change guidelines
 
-- Preserve a stack e a configuração existentes, salvo quando uma alteração for necessária.
-- Não crie backend real, banco de dados, Docker, autenticação, deploy ou CI/CD.
-- Não coloque os requisitos específicos de carros nas instruções genéricas do agente.
-- Mantenha a especificação da aplicação separada das instruções operacionais do agente.
-- Prefira componentes pequenos, hooks testáveis e tipos explícitos.
-- Use o alias `@/` configurado pelo Vite para imports dentro de `src`.
-- Não remova os mocks GraphQL existentes sem substituí-los por comportamento equivalente.
-- Não considere o trabalho concluído sem executar as validações relevantes.
+- Preserve the existing stack and configuration unless a change is necessary.
+- Do not create a real backend, database, Docker setup, authentication, deployment, or CI/CD.
+- Do not put car-specific requirements into the agent's generic instructions.
+- Keep application requirements separate from the agent's operational instructions.
+- Prefer small components, testable hooks, and explicit types.
+- Use the configured `@/` alias for imports inside `src`.
+- Do not remove the existing GraphQL mocks without replacing them with equivalent behavior.
+- Do not consider work complete without running the relevant validations.
 
-## Organização esperada do agente
+## Expected agent organization
 
-Uma implementação simples e aceitável pode conter:
+A simple and acceptable implementation may contain:
 
 ```text
 agent/
-├── src/
-│   ├── cli.ts
-│   ├── planner.ts
-│   ├── generator.ts
-│   ├── validator.ts
-│   └── tools/
-├── prompts/
-│   ├── agent-instructions.md
-│   ├── planner-instructions.md
-│   ├── generator-instructions.md
-│   └── repair-instructions.md
-├── specs/
-│   └── sample-spec.txt
-└── generated-app/
+|-- src/
+|   |-- cli.ts
+|   |-- planner.ts
+|   |-- generator.ts
+|   |-- validator.ts
+|   `-- tools/
+|-- prompts/
+|   |-- agent-instructions.md
+|   |-- planner-instructions.md
+|   |-- generator-instructions.md
+|   `-- repair-instructions.md
+|-- specs/
+|   `-- sample-spec.txt
+`-- tests/
 ```
 
-O `AGENTS.md` descreve o repositório e as regras de trabalho. Os arquivos em
-`prompts/` orientam o agente em tempo de execução. O `sample-spec.txt` descreve
-o produto que deve ser gerado e pode ser substituído por outra especificação.
+This `AGENTS.md` describes the repository and its working rules. Files under
+`prompts/` guide the agent at runtime. The `sample-spec.txt` file describes the
+product to generate and can be replaced with another specification.
 
-## Comandos de validação
+## Validation commands
 
 ```bash
 npm install
@@ -110,8 +110,8 @@ npm test
 npm run build
 ```
 
-## Estado inicial conhecido
+## Known initial state
 
-O boilerplate inicial passa em `typecheck`, nos testes existentes e no build.
-O `App.tsx` ainda é um placeholder; a aplicação final deve ser gerada pelo agente
-ou implementada no diretório de saída correspondente.
+The initial boilerplate passes typechecking, the existing tests, and the build.
+`App.tsx` is still a placeholder; the final application should be generated by
+the agent in the corresponding output directory.
