@@ -24,10 +24,9 @@ existing boilerplate constraints. Do not edit files.
 
 ## Required output
 
-Return only valid JSON matching this shape:
+Return only valid JSON matching this exact shape:
 
 {
-  "status": "ready | needs_changes",
   "requirements": [
     {
       "requirement": "requirement text",
@@ -35,7 +34,6 @@ Return only valid JSON matching this shape:
       "evidence": "file, test, or validation evidence"
     }
   ],
-  "strengths": ["verified strength"],
   "warnings": ["risk or limitation"],
-  "recommendedChanges": ["specific change, if needed"]
+  "recommendation": "ready | needs_changes"
 }

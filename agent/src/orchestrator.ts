@@ -10,6 +10,7 @@ import {
   type WorkspaceSummary,
 } from "./tools/index.js";
 import type { ValidationResult } from "./validator.js";
+import type { ReviewReport } from "./reviewer.js";
 
 const MAX_RELEVANT_FILES = 24;
 const MAX_RELEVANT_FILE_CHARACTERS = 20_000;
@@ -85,7 +86,19 @@ export type OrchestrationReport = {
   phases: PhaseResult[];
   completedTaskIds: string[];
   failedTaskId?: string;
+  review?: ReviewReport;
+  reviewError?: string;
 };
+
+export type FinalReviewContext = {
+  specification: string;
+  workspaceRoot: string;
+  orchestrationReport: OrchestrationReport;
+};
+
+export type FinalReviewer = (
+  context: FinalReviewContext,
+) => Promise<ReviewReport>;
 
 export type OrchestrationEvent =
   | { type: "phase_started"; taskId: string; index: number; total: number }
@@ -99,6 +112,9 @@ export type OrchestrationEvent =
       attempt: number;
       status: RepairTaskResult["status"];
     }
+  | { type: "review_started" }
+  | { type: "review_completed"; recommendation: ReviewReport["recommendation"] }
+  | { type: "review_failed"; error: string }
   | { type: "phase_failed"; taskId: string; error: string }
   | { type: "workflow_completed"; status: OrchestrationReport["status"] };
 
@@ -126,6 +142,7 @@ export type OrchestrationOptions = {
   validateTask: PhaseValidator;
   repairTask?: PhaseRepairer;
   maxRepairAttempts?: number;
+  finalReviewer?: FinalReviewer;
   onEvent?: (event: OrchestrationEvent) => void | Promise<void>;
 };
 
@@ -240,6 +257,7 @@ export async function runGenerationPhases({
   validateTask,
   repairTask,
   maxRepairAttempts,
+  finalReviewer,
   onEvent,
 }: OrchestrationOptions): Promise<OrchestrationReport> {
   const phases: PhaseResult[] = [];
@@ -518,10 +536,41 @@ export async function runGenerationPhases({
     });
   }
 
-  await emit({ type: "workflow_completed", status: "completed" });
-  return {
+  const completedReport: OrchestrationReport = {
     status: "completed",
     phases,
     completedTaskIds: completedTasks.map((completedTask) => completedTask.taskId),
   };
+
+  if (!finalReviewer) {
+    await emit({ type: "workflow_completed", status: "completed" });
+    return completedReport;
+  }
+
+  await emit({ type: "review_started" });
+  try {
+    const review = await finalReviewer({
+      specification,
+      workspaceRoot,
+      orchestrationReport: completedReport,
+    });
+    await emit({
+      type: "review_completed",
+      recommendation: review.recommendation,
+    });
+    await emit({ type: "workflow_completed", status: "completed" });
+    return {
+      ...completedReport,
+      review,
+    };
+  } catch (error) {
+    const reviewError = `Final review failed: ${formatError(error)}`;
+    await emit({ type: "review_failed", error: reviewError });
+    await emit({ type: "workflow_completed", status: "blocked" });
+    return {
+      ...completedReport,
+      status: "blocked",
+      reviewError,
+    };
+  }
 }
