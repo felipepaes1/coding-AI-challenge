@@ -21,13 +21,13 @@ export const allowedCommands = [
 
 type AllowedCommand = (typeof allowedCommands)[number];
 
-type ToolFailure = {
+export type ToolFailure = {
   ok: false;
   error: string;
   code: string;
 };
 
-type ToolSuccess<T extends object> = { ok: true } & T;
+export type ToolSuccess<T extends object> = { ok: true } & T;
 
 export class ToolWorkspaceError extends Error {
   constructor(
@@ -208,12 +208,19 @@ const runCommandParameters = z.object({
 
 const emptyParameters = z.object({});
 
-type ListedEntry = {
+export type ListedEntry = {
   path: string;
   type: "file" | "directory" | "symlink";
 };
 
-async function listWorkspaceFiles(
+export type WorkspaceSummary = {
+  workspaceRoot: string;
+  packageJson: Record<string, unknown> | null;
+  files: ListedEntry[];
+  filesTruncated: boolean;
+};
+
+export async function listWorkspaceFiles(
   workspaceRoot: string,
   relativePath: string,
   recursive: boolean,
@@ -271,7 +278,7 @@ async function listWorkspaceFiles(
   };
 }
 
-async function readWorkspaceFile(
+export async function readWorkspaceFile(
   workspaceRoot: string,
   path: string,
   maxCharacters: number,
@@ -393,14 +400,9 @@ async function runWorkspaceCommand(
   }
 }
 
-async function getWorkspaceSummary(
+export async function getWorkspaceSummary(
   workspaceRoot: string,
-): Promise<ToolSuccess<{
-  workspaceRoot: string;
-  packageJson: Record<string, unknown> | null;
-  files: ListedEntry[];
-  filesTruncated: boolean;
-}>> {
+): Promise<ToolSuccess<WorkspaceSummary>> {
   let packageJson: Record<string, unknown> | null = null;
   try {
     const packageContent = await readWorkspaceFile(workspaceRoot, "package.json", 20_000);
